@@ -1,117 +1,121 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 from openai import OpenAI
+import queue
+import pydub
 import os
+import tempfile
 
-# --- 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS ---
-st.set_page_config(
-    page_title="2Bilingue Pro Live", 
-    page_icon="🎙️", 
-    layout="wide"
-)
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="2Bilingue Pro - Real Time", layout="wide")
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #0e1117; color: white; }
-    .status-card { 
-        background: #1e2130; 
-        padding: 20px; 
-        border-radius: 15px; 
-        border-left: 5px solid #00d4ff;
-        margin-bottom: 20px;
-    }
-    .main-title {
-        color: #00d4ff;
-        text-align: center;
-        font-weight: bold;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# Inicialización de estados de sesión
 if "user" not in st.session_state: st.session_state.user = None
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 
-# --- 2. SISTEMA DE AUTENTICACIÓN ---
+# --- 2. LOGIN ---
 if not st.session_state.user:
-    _, col_login, _ = st.columns([1, 1.2, 1])
-    with col_login:
-        st.markdown("<h1 class='main-title'>🔐 Acceso Pro</h1>", unsafe_allow_html=True)
-        u = st.text_input("Usuario")
-        p = st.text_input("Contraseña", type="password")
-        if st.button("Ingresar al Sistema", use_container_width=True):
-            if p == "Seguridad2026*+":
-                st.session_state.user = u
-                st.rerun()
-            else:
-                st.error("Credenciales incorrectas")
+    st.title("🔐 Acceso 2Bilingue Pro")
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar"):
+        if p == "Seguridad2026*+":
+            st.session_state.user = u
+            st.rerun()
     st.stop()
 
-# --- 3. BARRA LATERAL (SIDEBAR) ---
-st.sidebar.markdown(f"### 👤 Agente: {st.session_state.user}")
-key_input = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
+# --- 3. PROCESADOR DE AUDIO (EL CEREBRO) ---
+class VideoProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.audio_queue = queue.Queue()
 
-# Actualizar la key en la sesión solo si se escribe algo
-if key_input:
-    st.session_state.api_key = key_input
+    def recv_audio(self, frame):
+        # Captura los frames del micrófono y los pone en una fila
+        self.audio_queue.put(frame)
+        return frame
 
-st.sidebar.divider()
-st.sidebar.info("Modo: Traducción Simultánea EN ➔ ES")
-if st.sidebar.button("Cerrar Sesión"):
-    st.session_state.user = None
-    st.rerun()
+# --- 4. INTERFAZ ---
+st.sidebar.header(f"👤 {st.session_state.user}")
+st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
 
-# --- 4. VALIDACIÓN DE CLIENTE OPENAI ---
-client = None
-if st.session_state.api_key:
-    try:
-        # Validamos que la key tenga un formato básico antes de crear el cliente
-        if st.session_state.api_key.startswith("sk-"):
-            client = OpenAI(api_key=st.session_state.api_key)
-        else:
-            st.sidebar.error("Formato de API Key no válido")
-    except Exception as e:
-        st.sidebar.error("Error al inicializar OpenAI")
-else:
-    st.warning("👈 Por favor, ingresa tu OpenAI API Key en la barra lateral para comenzar.")
-
-# --- 5. INTERFAZ DE TRADUCCIÓN ---
-st.markdown("<h1 class='main-title'>🚀 Intérprete Simultáneo en Tiempo Real</h1>", unsafe_allow_html=True)
+st.title("🚀 Traducción Simultánea Profesional")
+st.info("Instrucciones: Dale a 'Start', habla en inglés y el sistema procesará fragmentos automáticamente.")
 
 col_en, col_es = st.columns(2)
+area_en = col_en.empty()
+area_es = col_es.empty()
 
-with col_en:
-    st.markdown("<div class='status-card'><h4>🇺🇸 English Input</h4></div>", unsafe_allow_html=True)
-    area_en = st.empty()
-    area_en.info("Esperando activación de micrófono...")
-
-with col_es:
-    st.markdown("<div class='status-card'><h4>🇪🇸 Traducción (Español)</h4></div>", unsafe_allow_html=True)
-    area_es = st.empty()
-    area_es.info("La traducción aparecerá aquí...")
-
-# --- 6. MOTOR WEBRTC (TRANSMISIÓN CONTINUA) ---
-if client:
-    st.divider()
-    st.subheader("🎚️ Control de Transmisión")
+# --- 5. LÓGICA DE WEBRTC Y OPENAI ---
+if st.session_state.api_key:
+    client = OpenAI(api_key=st.session_state.api_key)
     
-    # Este componente mantiene el micro abierto para sesiones de hasta 1 hora
-    ctx = webrtc_streamer(
-        key="interpreter-pro",
+    webrtc_ctx = webrtc_streamer(
+        key="translator",
         mode=WebRtcMode.SENDONLY,
+        audio_processor_factory=VideoProcessor,
         media_stream_constraints={"audio": True, "video": False},
-        rtc_configuration={
-            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-        },
-        async_processing=True
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
-    if ctx.state.playing:
-        st.success("🛰️ SISTEMA ACTIVO: El micrófono está transmitiendo en vivo.")
-        area_en.success("🎤 Escuchando inglés continuamente...")
-        area_es.warning("Traduciendo ráfagas de audio en tiempo real...")
+    # Si el micrófono está encendido
+    if webrtc_ctx.audio_processor:
+        st.success("🎤 Micrófono conectado. Procesando flujo de datos...")
         
-        # Nota técnica: Para mostrar el texto progresivo, se utiliza un 
-        # hilo de fondo que procesa los frames de audio capturados por WebRTC.
-    else:
-        st.info("Presiona 'Start' para iniciar la sesión de interpretación.")
+        # Buffer para acumular audio y enviarlo a traducir cada cierto tiempo
+        if "audio_buffer" not in st.session_state:
+            st.session_state.audio_buffer = pydub.AudioSegment.empty()
+
+        # Intentamos extraer audio de la fila del procesador
+        try:
+            # Recuperamos los fragmentos de audio
+            frames = []
+            while True:
+                try:
+                    frames.append(webrtc_ctx.audio_processor.audio_queue.get_nowait())
+                except queue.Empty:
+                    break
+            
+            if len(frames) > 0:
+                # Convertimos frames a audio procesable
+                for frame in frames:
+                    sound = pydub.AudioSegment(
+                        data=frame.to_ndarray().tobytes(),
+                        sample_width=frame.format.bytes,
+                        frame_rate=frame.sample_rate,
+                        channels=len(frame.layout.channels)
+                    )
+                    st.session_state.audio_buffer += sound
+
+                # Cuando tenemos suficiente audio (ej. 5 segundos), traducimos
+                if len(st.session_state.audio_buffer) > 5000:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                        st.session_state.audio_buffer.export(tmp_file.name, format="wav")
+                        
+                        # 1. Transcribir
+                        with open(tmp_file.name, "rb") as f:
+                            trans = client.audio.transcriptions.create(model="whisper-1", file=f, language="en")
+                        
+                        texto_en = trans.text
+                        area_en.markdown(f"**Escuchado:**\n{texto_en}")
+
+                        # 2. Traducir con Stream para velocidad
+                        if texto_en:
+                            res = client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{"role": "system", "content": "Traduce al español."}, {"role": "user", "content": texto_en}],
+                                stream=True
+                            )
+                            
+                            traduccion = ""
+                            for chunk in res:
+                                if chunk.choices[0].delta.content:
+                                    traduccion += chunk.choices[0].delta.content
+                                    area_es.markdown(f"**Traducido:**\n{traduccion}▌")
+                        
+                        # Limpiamos buffer para la siguiente ráfaga
+                        st.session_state.audio_buffer = pydub.AudioSegment.empty()
+                        os.remove(tmp_file.name)
+                        
+        except Exception as e:
+            pass # Manejo silencioso de buffers vacíos
+else:
+    st.warning("👈 Ingresa tu API Key para activar el motor.")
