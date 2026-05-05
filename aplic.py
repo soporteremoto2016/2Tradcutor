@@ -5,12 +5,14 @@ import queue
 import pydub
 import os
 import tempfile
+import time
 
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="2Bilingue Pro - Real Time", layout="wide")
 
 if "user" not in st.session_state: st.session_state.user = None
 if "api_key" not in st.session_state: st.session_state.api_key = ""
+if "transcript_history" not in st.session_state: st.session_state.transcript_history = []
 
 # --- 2. LOGIN ---
 if not st.session_state.user:
@@ -23,13 +25,13 @@ if not st.session_state.user:
             st.rerun()
     st.stop()
 
-# --- 3. PROCESADOR DE AUDIO (EL CEREBRO) ---
-class VideoProcessor(AudioProcessorBase):
+# --- 3. PROCESADOR DE AUDIO EN TIEMPO REAL ---
+class AudioProcessor(AudioProcessorBase):
     def __init__(self):
         self.audio_queue = queue.Queue()
 
     def recv_audio(self, frame):
-        # Captura los frames del micrófono y los pone en una fila
+        # Captura cruda de audio del navegador
         self.audio_queue.put(frame)
         return frame
 
@@ -37,85 +39,106 @@ class VideoProcessor(AudioProcessorBase):
 st.sidebar.header(f"👤 {st.session_state.user}")
 st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
 
-st.title("🚀 Traducción Simultánea Profesional")
-st.info("Instrucciones: Dale a 'Start', habla en inglés y el sistema procesará fragmentos automáticamente.")
+st.title("🚀 Traducción Simultánea Continua")
+st.markdown("---")
 
 col_en, col_es = st.columns(2)
 area_en = col_en.empty()
 area_es = col_es.empty()
 
-# --- 5. LÓGICA DE WEBRTC Y OPENAI ---
+# --- 5. MOTOR DE STREAMING ---
 if st.session_state.api_key:
     client = OpenAI(api_key=st.session_state.api_key)
     
-    webrtc_ctx = webrtc_streamer(
-        key="translator",
+    ctx = webrtc_streamer(
+        key="translator-v2",
         mode=WebRtcMode.SENDONLY,
-        audio_processor_factory=VideoProcessor,
+        audio_processor_factory=AudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
-    # Si el micrófono está encendido
-    if webrtc_ctx.audio_processor:
-        st.success("🎤 Micrófono conectado. Procesando flujo de datos...")
-        
-        # Buffer para acumular audio y enviarlo a traducir cada cierto tiempo
-        if "audio_buffer" not in st.session_state:
-            st.session_state.audio_buffer = pydub.AudioSegment.empty()
+    if ctx.audio_processor:
+        # Contenedor de estado dinámico
+        status_info = st.empty()
+        status_info.success("🎤 ESCUCHANDO... Hable ahora.")
 
-        # Intentamos extraer audio de la fila del procesador
-        try:
-            # Recuperamos los fragmentos de audio
-            frames = []
+        # Buffer persistente en la sesión
+        if "buffer" not in st.session_state:
+            st.session_state.buffer = pydub.AudioSegment.empty()
+
+        # BUCLE DE PROCESAMIENTO ACTIVO
+        while ctx.state.playing:
+            # 1. Extraer todos los fragmentos de la cola
+            new_frames = []
             while True:
                 try:
-                    frames.append(webrtc_ctx.audio_processor.audio_queue.get_nowait())
+                    new_frames.append(ctx.audio_processor.audio_queue.get_nowait())
                 except queue.Empty:
                     break
             
-            if len(frames) > 0:
-                # Convertimos frames a audio procesable
-                for frame in frames:
+            # 2. Si hay audio nuevo, lo añadimos al buffer
+            if new_frames:
+                for frame in new_frames:
+                    # Convertir frames de PyAV a Pydub
                     sound = pydub.AudioSegment(
                         data=frame.to_ndarray().tobytes(),
                         sample_width=frame.format.bytes,
                         frame_rate=frame.sample_rate,
                         channels=len(frame.layout.channels)
                     )
-                    st.session_state.audio_buffer += sound
+                    st.session_state.buffer += sound
 
-                # Cuando tenemos suficiente audio (ej. 5 segundos), traducimos
-                if len(st.session_state.audio_buffer) > 5000:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                        st.session_state.audio_buffer.export(tmp_file.name, format="wav")
-                        
-                        # 1. Transcribir
+            # 3. ¿Tenemos suficiente audio para procesar? (Cada 4 segundos)
+            if len(st.session_state.buffer) > 4000:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                    st.session_state.buffer.export(tmp_file.name, format="wav")
+                    
+                    try:
+                        # TRANSCRIPCIÓN
                         with open(tmp_file.name, "rb") as f:
-                            trans = client.audio.transcriptions.create(model="whisper-1", file=f, language="en")
+                            transcript = client.audio.transcriptions.create(
+                                model="whisper-1", 
+                                file=f, 
+                                language="en"
+                            )
                         
-                        texto_en = trans.text
-                        area_en.markdown(f"**Escuchado:**\n{texto_en}")
+                        texto_en = transcript.text
+                        if texto_en.strip():
+                            area_en.info(f"🇺🇸 **English:**\n{texto_en}")
 
-                        # 2. Traducir con Stream para velocidad
-                        if texto_en:
+                            # TRADUCCIÓN
                             res = client.chat.completions.create(
                                 model="gpt-4o-mini",
-                                messages=[{"role": "system", "content": "Traduce al español."}, {"role": "user", "content": texto_en}],
-                                stream=True
+                                messages=[
+                                    {"role": "system", "content": "Translate to Spanish. Be concise."},
+                                    {"role": "user", "content": texto_en}
+                                ]
                             )
+                            texto_es = res.choices[0].message.content
+                            area_es.success(f"🇪🇸 **Español:**\n{texto_es}")
                             
-                            traduccion = ""
-                            for chunk in res:
-                                if chunk.choices[0].delta.content:
-                                    traduccion += chunk.choices[0].delta.content
-                                    area_es.markdown(f"**Traducido:**\n{traduccion}▌")
-                        
-                        # Limpiamos buffer para la siguiente ráfaga
-                        st.session_state.audio_buffer = pydub.AudioSegment.empty()
-                        os.remove(tmp_file.name)
-                        
-        except Exception as e:
-            pass # Manejo silencioso de buffers vacíos
+                            # Opcional: Acumular historial
+                            st.session_state.transcript_history.append(f"EN: {texto_en} | ES: {texto_es}")
+
+                    except Exception as e:
+                        st.error(f"Error de procesamiento: {e}")
+                    
+                    # Reiniciar buffer para la siguiente ráfaga
+                    st.session_state.buffer = pydub.AudioSegment.empty()
+                    os.remove(tmp_file.name)
+
+            # Pequeña pausa para no saturar el procesador, luego forzar actualización
+            time.sleep(0.5)
+            # Esto es lo que permite que el bucle siga corriendo sin intervención del usuario
+            if len(new_frames) > 0:
+                st.rerun()
+
 else:
-    st.warning("👈 Ingresa tu API Key para activar el motor.")
+    st.warning("👈 Por favor, ingresa tu API Key para activar el motor profesional.")
+
+# --- 6. HISTORIAL DE SESIÓN ---
+if st.session_state.transcript_history:
+    with st.expander("Ver transcripción completa de la sesión"):
+        for line in st.session_state.transcript_history:
+            st.write(line)
