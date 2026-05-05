@@ -7,38 +7,37 @@ import os
 import tempfile
 import time
 
-st.set_page_config(page_title="2Bilingue Pro - Live Streaming", layout="wide")
+st.set_page_config(page_title="2Bilingue Pro - Live", layout="wide")
 
-# --- LOGIN Y CONFIG ---
-if "history" not in st.session_state: st.session_state.history = []
-if "api_key" not in st.session_state: st.session_state.api_key = ""
+# --- 1. INICIALIZACIÓN CRÍTICA (Evita el AttributeError) ---
+if "buffer" not in st.session_state:
+    st.session_state.buffer = pydub.AudioSegment.empty()
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-st.sidebar.title("⚙️ Configuración")
-st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
+# --- 2. CONFIGURACIÓN ---
+api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+client = OpenAI(api_key=api_key) if api_key else None
 
-# --- PROCESADOR DE AUDIO EN TIEMPO REAL ---
+# --- 3. PROCESADOR ---
 class LiveAudioProcessor(AudioProcessorBase):
     def __init__(self):
         self.audio_queue = queue.Queue()
 
     def recv_audio(self, frame):
-        # Captura frames y los mete en la cola sin detener el flujo
         self.audio_queue.put(frame)
         return frame
 
-# --- INTERFAZ PRINCIPAL ---
-st.title("🎙️ Intérprete Simultáneo en Vivo")
-st.caption("El texto aparecerá automáticamente cada pocos segundos mientras hablas.")
+# --- 4. INTERFAZ ---
+st.title("🎙️ Traducción en Tiempo Real")
 
 col_en, col_es = st.columns(2)
-container_en = col_en.empty()
-container_es = col_es.empty()
+area_en = col_en.empty()
+area_es = col_es.empty()
 
-if st.session_state.api_key:
-    client = OpenAI(api_key=st.session_state.api_key)
-
+if client:
     webrtc_ctx = webrtc_streamer(
-        key="live-translator-v4",
+        key="live-v5",
         mode=WebRtcMode.SENDONLY,
         audio_processor_factory=LiveAudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
@@ -46,68 +45,59 @@ if st.session_state.api_key:
         async_processing=True,
     )
 
-    # Lógica de procesamiento "en caliente"
     if webrtc_ctx.audio_processor:
-        if "audio_buffer" not in st.session_state:
-            st.session_state.audio_buffer = pydub.AudioSegment.empty()
-
-        # Extraemos frames de la cola mientras el micro sigue abierto
-        new_frames = []
+        # Extraer audios de la cola
         while True:
             try:
-                new_frames.append(webrtc_ctx.audio_processor.audio_queue.get_nowait())
-            except queue.Empty:
-                break
-        
-        if new_frames:
-            for frame in new_frames:
+                frame = webrtc_ctx.audio_processor.audio_queue.get_nowait()
                 sound = pydub.AudioSegment(
                     data=frame.to_ndarray().tobytes(),
                     sample_width=frame.format.bytes,
                     frame_rate=frame.sample_rate,
                     channels=len(frame.layout.channels)
                 )
-                st.session_state.audio_buffer += sound
+                st.session_state.buffer += sound
+            except queue.Empty:
+                break
 
-        # UMBRAL DE TIEMPO: Procesamos cada 4 segundos de audio acumulado
-        if len(st.session_state.buffer) > 4000:
+        # PROCESAMIENTO (Cotejamos que el buffer exista y tenga audio)
+        # Usamos 3000ms (3 seg) para mayor rapidez
+        if len(st.session_state.buffer) > 3000:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 st.session_state.buffer.export(tmp.name, format="wav")
                 
                 try:
-                    # 1. Whisper transcribe el bloque actual
                     with open(tmp.name, "rb") as f:
-                        transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+                        trans = client.audio.transcriptions.create(model="whisper-1", file=f)
                     
-                    if transcript.text.strip():
-                        # 2. GPT traduce el bloque
+                    if trans.text.strip():
+                        # Traducción
                         res = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": f"Traduce: {transcript.text}"}]
+                            messages=[{"role": "user", "content": f"Traduce: {trans.text}"}]
                         )
+                        traduccion = res.choices[0].message.content
                         
-                        # Actualizamos la pantalla sin detener el micro
-                        container_en.info(f"**🇺🇸 Inglés:**\n{transcript.text}")
-                        container_es.success(f"**🇪🇸 Español:**\n{res.choices[0].message.content}")
+                        # Mostrar
+                        area_en.info(f"🇺🇸 {trans.text}")
+                        area_es.success(f"🇪🇸 {traduccion}")
+                        st.session_state.history.append({"en": trans.text, "es": traduccion})
                         
-                        # Guardamos en el historial
-                        st.session_state.history.append({"en": transcript.text, "es": res.choices[0].message.content})
-                        
-                    # IMPORTANTE: Vaciamos el buffer para la siguiente tanda, pero el micro sigue START
+                    # Limpiar buffer
                     st.session_state.buffer = pydub.AudioSegment.empty()
-                    
                 except Exception as e:
-                    pass # Manejo silencioso para no interrumpir el flujo
+                    st.error(f"Error: {e}")
                 finally:
                     if os.path.exists(tmp.name): os.remove(tmp.name)
 
-        # Forzamos un pequeño delay y rerun para que Streamlit vuelva a mirar la cola
+        # Bucle de refresco para que no se detenga
         time.sleep(0.1)
         st.rerun()
+else:
+    st.warning("Ingresa la API Key para comenzar.")
 
-# --- HISTORIAL ACUMULADO ---
+# Historial
 if st.session_state.history:
-    with st.expander("Historial de la conversación"):
-        for item in reversed(st.session_state.history):
-            st.write(f"**EN:** {item['en']}  \n**ES:** {item['es']}")
-            st.divider()
+    with st.expander("Historial"):
+        for h in reversed(st.session_state.history):
+            st.write(f"**EN:** {h['en']} | **ES:** {h['es']}")
