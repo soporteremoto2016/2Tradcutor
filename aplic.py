@@ -5,99 +5,86 @@ import queue
 import pydub
 import os
 import tempfile
-import time
 
-st.set_page_config(page_title="2Bilingue Pro - Live", layout="wide")
+st.set_page_config(page_title="2Bilingue Pro", layout="wide")
 
-# --- 1. INICIALIZACIÓN CRÍTICA (Evita el AttributeError) ---
-if "buffer" not in st.session_state:
-    st.session_state.buffer = pydub.AudioSegment.empty()
-if "history" not in st.session_state:
-    st.session_state.history = []
+# --- INICIALIZACIÓN ---
+if "history" not in st.session_state: st.session_state.history = []
+# Usamos un archivo temporal para el buffer en lugar de la memoria de Streamlit
+if "temp_audio_path" not in st.session_state:
+    st.session_state.temp_audio_path = tempfile.mktemp(suffix=".wav")
+    pydub.AudioSegment.empty().export(st.session_state.temp_audio_path, format="wav")
 
-# --- 2. CONFIGURACIÓN ---
+# --- SIDEBAR ---
 api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# --- 3. PROCESADOR ---
-class LiveAudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self.audio_queue = queue.Queue()
+st.title("🎙️ Traducción Simultánea Pro")
 
-    def recv_audio(self, frame):
-        self.audio_queue.put(frame)
-        return frame
-
-# --- 4. INTERFAZ ---
-st.title("🎙️ Traducción en Tiempo Real")
-
+# Columnas para ver el texto
 col_en, col_es = st.columns(2)
 area_en = col_en.empty()
 area_es = col_es.empty()
 
+class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.audio_queue = queue.Queue()
+    def recv_audio(self, frame):
+        self.audio_queue.put(frame)
+        return frame
+
 if client:
-    webrtc_ctx = webrtc_streamer(
-        key="live-v5",
+    ctx = webrtc_streamer(
+        key="streaming-fix",
         mode=WebRtcMode.SENDONLY,
-        audio_processor_factory=LiveAudioProcessor,
+        audio_processor_factory=AudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         async_processing=True,
     )
 
-    if webrtc_ctx.audio_processor:
-        # Extraer audios de la cola
+    if ctx.audio_processor:
+        # 1. Sacar audio de la cola
+        new_audio = pydub.AudioSegment.empty()
         while True:
             try:
-                frame = webrtc_ctx.audio_processor.audio_queue.get_nowait()
-                sound = pydub.AudioSegment(
+                frame = ctx.audio_processor.audio_queue.get_nowait()
+                new_audio += pydub.AudioSegment(
                     data=frame.to_ndarray().tobytes(),
                     sample_width=frame.format.bytes,
                     frame_rate=frame.sample_rate,
                     channels=len(frame.layout.channels)
                 )
-                st.session_state.buffer += sound
             except queue.Empty:
                 break
 
-        # PROCESAMIENTO (Cotejamos que el buffer exista y tenga audio)
-        # Usamos 3000ms (3 seg) para mayor rapidez
-        if len(st.session_state.buffer) > 3000:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                st.session_state.buffer.export(tmp.name, format="wav")
-                
+        if len(new_audio) > 0:
+            # Añadir al archivo temporal
+            current_audio = pydub.AudioSegment.from_wav(st.session_state.temp_audio_path)
+            combined = current_audio + new_audio
+            combined.export(st.session_state.temp_audio_path, format="wav")
+
+            # 2. Si tenemos más de 4 segundos, procesamos
+            if len(combined) > 4000:
                 try:
-                    with open(tmp.name, "rb") as f:
+                    with open(st.session_state.temp_audio_path, "rb") as f:
                         trans = client.audio.transcriptions.create(model="whisper-1", file=f)
                     
                     if trans.text.strip():
-                        # Traducción
                         res = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": f"Traduce: {trans.text}"}]
+                            messages=[{"role": "user", "content": f"Translate to Spanish: {trans.text}"}]
                         )
-                        traduccion = res.choices[0].message.content
-                        
-                        # Mostrar
+                        # MOSTRAR RESULTADOS INMEDIATAMENTE
                         area_en.info(f"🇺🇸 {trans.text}")
-                        area_es.success(f"🇪🇸 {traduccion}")
-                        st.session_state.history.append({"en": trans.text, "es": traduccion})
-                        
-                    # Limpiar buffer
-                    st.session_state.buffer = pydub.AudioSegment.empty()
+                        area_es.success(f"🇪🇸 {res.choices[0].message.content}")
+                        st.session_state.history.append({"en": trans.text, "es": res.choices[0].message.content})
+                    
+                    # Resetear el archivo temporal para la siguiente frase
+                    pydub.AudioSegment.empty().export(st.session_state.temp_audio_path, format="wav")
                 except Exception as e:
                     st.error(f"Error: {e}")
-                finally:
-                    if os.path.exists(tmp.name): os.remove(tmp.name)
 
-        # Bucle de refresco para que no se detenga
-        time.sleep(0.1)
+        # El truco para que el "Running" no bloquee la interfaz:
+        st.button("Actualizar Vista") # Un pequeño ancla visual
         st.rerun()
-else:
-    st.warning("Ingresa la API Key para comenzar.")
-
-# Historial
-if st.session_state.history:
-    with st.expander("Historial"):
-        for h in reversed(st.session_state.history):
-            st.write(f"**EN:** {h['en']} | **ES:** {h['es']}")
