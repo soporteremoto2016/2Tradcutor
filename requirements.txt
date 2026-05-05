@@ -3,3 +3,4 @@ streamlit-webrtc==0.47.1
 openai
 pydub
 aiortc
+streamlit-autorefresh
