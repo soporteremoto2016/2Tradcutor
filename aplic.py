@@ -4,7 +4,7 @@ import tempfile
 import os
 
 # --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="2Bilingue - Traductor EN to ES", layout="wide")
+st.set_page_config(page_title="2Bilingue - Traductor Persistente", layout="wide")
 
 if "user" not in st.session_state: st.session_state.user = None
 if "api_key" not in st.session_state: st.session_state.api_key = ""
@@ -28,9 +28,14 @@ with st.sidebar:
     st.divider()
     st.success("Modo: Inglés ➔ Español")
 
-# --- 4. LÓGICA DE TRADUCCIÓN UNIDIRECCIONAL ---
+# --- 4. INTERFAZ Y CONTENEDORES (CRÍTICO) ---
 st.title("🎙️ Traductor: Inglés a Español")
-st.info("Habla en inglés y el sistema traducirá todo al español automáticamente.")
+
+# Reservamos los espacios antes de procesar para que no desaparezcan
+col_izq, col_der = st.columns(2)
+placeholder_ingles = col_izq.empty()
+placeholder_espanol = col_der.empty()
+placeholder_audio = st.empty()
 
 if not st.session_state.api_key:
     st.warning("⚠️ Ingresa tu API Key para comenzar.")
@@ -52,52 +57,44 @@ if audio_input is not None:
                     tmp_file.write(audio_input.getvalue())
                     tmp_path = tmp_file.name
 
-                # Paso 2: Transcripción FORZADA A INGLÉS
+                # Paso 2: Transcripción (Inglés)
                 with open(tmp_path, "rb") as f:
                     transcript = client.audio.transcriptions.create(
                         model="whisper-1", 
                         file=f,
-                        language="en",  # Forzamos a que entienda solo inglés
-                        prompt="This is a recording in English. Transcribe it literally.",
+                        language="en",
                         temperature=0
                     )
                 
                 texto_ingles = transcript.text.strip()
 
-                if not texto_ingles or len(texto_ingles) < 3:
-                    st.error("No se detectó audio claro en inglés.")
-                else:
-                    # Paso 3: Traducción FORZADA A ESPAÑOL
+                if texto_ingles:
+                    # Paso 3: Traducción (Español)
                     res_traduccion = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[
-                            {"role": "system", "content": "Eres un traductor experto. Tu única tarea es traducir el texto que recibas del INGLÉS al ESPAÑOL de forma natural y completa. No respondas en inglés, solo en español."},
+                            {"role": "system", "content": "Traduce íntegramente del INGLÉS al ESPAÑOL. Solo entrega la traducción."},
                             {"role": "user", "content": texto_ingles}
                         ],
                         temperature=0
                     )
                     texto_espanol = res_traduccion.choices[0].message.content.strip()
 
-                    # Paso 4: Generación de Voz en Español
+                    # Paso 4: Generación de Voz
                     audio_tts = client.audio.speech.create(
                         model="tts-1",
-                        voice="nova", # Voz clara para español
+                        voice="nova",
                         input=texto_espanol
                     )
 
-                    # Paso 5: Mostrar en pantalla (Mapeo Correcto)
-                    c1, c2 = st.columns(2)
+                    # --- PASO 5: RENDERIZADO EN CONTENEDORES RESERVADOS ---
+                    # Esto asegura que el texto se mantenga visible
+                    placeholder_ingles.markdown(f"### 🇺🇸 Escuchado\n{texto_ingles}")
+                    placeholder_espanol.markdown(f"### 🇪🇸 Traducción\n{texto_espanol}")
                     
-                    with c1:
-                        st.markdown("### 🇺🇸 Escuchado (Inglés)")
-                        st.info(texto_ingles)
-                    
-                    with c2:
-                        st.markdown("### 🇪🇸 Traducción (Español)")
-                        st.success(texto_espanol)
-
-                    # Reproducción automática
-                    st.audio(audio_tts.content, format="audio/mp3", autoplay=True)
+                    # El audio se coloca en su propio contenedor
+                    with placeholder_audio:
+                        st.audio(audio_tts.content, format="audio/mp3", autoplay=True)
                     
                     st.session_state.last_audio_id = current_id
                     status.update(label="✅ Traducción completada", state="complete")
