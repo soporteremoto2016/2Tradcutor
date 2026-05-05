@@ -3,8 +3,8 @@ from openai import OpenAI
 import tempfile
 import os
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="2Bilingue Pro - Flujo Corregido", layout="wide")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="2Bilingue - Traductor EN to ES", layout="wide")
 
 if "user" not in st.session_state: st.session_state.user = None
 if "api_key" not in st.session_state: st.session_state.api_key = ""
@@ -26,10 +26,11 @@ with st.sidebar:
     st.title(f"👤 {st.session_state.user}")
     st.session_state.api_key = st.text_input("OpenAI API Key", value=st.session_state.api_key, type="password")
     st.divider()
-    st.info("Dirección: Voz (ES/EN) ➔ Texto ➔ Traducción ➔ Voz")
+    st.success("Modo: Inglés ➔ Español")
 
-# --- 4. LÓGICA DE TRADUCCIÓN CON FLUJO CORREGIDO ---
-st.title("🎙️ Traductor Profesional Corregido")
+# --- 4. LÓGICA DE TRADUCCIÓN UNIDIRECCIONAL ---
+st.title("🎙️ Traductor: Inglés a Español")
+st.info("Habla en inglés y el sistema traducirá todo al español automáticamente.")
 
 if not st.session_state.api_key:
     st.warning("⚠️ Ingresa tu API Key para comenzar.")
@@ -37,79 +38,72 @@ if not st.session_state.api_key:
 
 client = OpenAI(api_key=st.session_state.api_key)
 
-# Widget de entrada
-audio_input = st.audio_input("Graba ahora tu mensaje")
+audio_input = st.audio_input("Escuchando inglés...")
 
 if audio_input is not None:
-    # Evitar doble procesamiento por recarga de Streamlit
     current_id = f"{audio_input.size}_{audio_input.name}"
     
     if current_id != st.session_state.last_audio_id:
         try:
-            with st.status("🧠 Procesando flujo de datos...", expanded=True) as status:
+            with st.status("📡 Procesando traducción...", expanded=True) as status:
                 
-                # Paso 1: Guardado y Transcripción (LO QUE SE ESCUCHA)
+                # Paso 1: Guardar audio temporal
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
                     tmp_file.write(audio_input.getvalue())
                     tmp_path = tmp_file.name
 
+                # Paso 2: Transcripción FORZADA A INGLÉS
                 with open(tmp_path, "rb") as f:
-                    # Forzamos parámetros para evitar alucinaciones (como lo de Amara.org)
                     transcript = client.audio.transcriptions.create(
                         model="whisper-1", 
                         file=f,
-                        prompt="Transcripción literal de voz humana. No inventar subtítulos.",
+                        language="en",  # Forzamos a que entienda solo inglés
+                        prompt="This is a recording in English. Transcribe it literally.",
                         temperature=0
                     )
                 
-                # Esta es la variable de entrada real
-                texto_escuchado_original = transcript.text.strip()
+                texto_ingles = transcript.text.strip()
 
-                if not texto_escuchado_original or len(texto_escuchado_original) < 3:
-                    st.error("No se detectó audio claro. Intenta de nuevo.")
+                if not texto_ingles or len(texto_ingles) < 3:
+                    st.error("No se detectó audio claro en inglés.")
                 else:
-                    # Paso 2: Traducción (LO QUE SE TRADUCE)
-                    # Usamos un prompt que garantiza la inversión del idioma
+                    # Paso 3: Traducción FORZADA A ESPAÑOL
                     res_traduccion = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[
-                            {"role": "system", "content": "Eres un traductor exacto. Si el texto está en español, tradúcelo al inglés. Si está en inglés, al español. Solo devuelve la traducción íntegra."},
-                            {"role": "user", "content": texto_escuchado_original}
+                            {"role": "system", "content": "Eres un traductor experto. Tu única tarea es traducir el texto que recibas del INGLÉS al ESPAÑOL de forma natural y completa. No respondas en inglés, solo en español."},
+                            {"role": "user", "content": texto_ingles}
                         ],
                         temperature=0
                     )
-                    texto_traducido_final = res_traduccion.choices[0].message.content.strip()
+                    texto_espanol = res_traduccion.choices[0].message.content.strip()
 
-                    # Paso 3: Generación de Voz de la traducción
+                    # Paso 4: Generación de Voz en Español
                     audio_tts = client.audio.speech.create(
                         model="tts-1",
-                        voice="nova",
-                        input=texto_traducido_final
+                        voice="nova", # Voz clara para español
+                        input=texto_espanol
                     )
 
-                    # Paso 4: Visualización en columnas (MAPEO CORREGIDO)
-                    # Columna Izquierda: Siempre lo que el usuario habló (Original)
-                    # Columna Derecha: Siempre el resultado de la IA (Traducción)
+                    # Paso 5: Mostrar en pantalla (Mapeo Correcto)
                     c1, c2 = st.columns(2)
                     
                     with c1:
-                        st.info("👂 **Lo que el sistema escuchó:**")
-                        st.write(texto_escuchado_original)
+                        st.markdown("### 🇺🇸 Escuchado (Inglés)")
+                        st.info(texto_ingles)
                     
                     with c2:
-                        st.success("🇺🇸 **Traducción realizada:**")
-                        st.subheader(texto_traducido_final)
+                        st.markdown("### 🇪🇸 Traducción (Español)")
+                        st.success(texto_espanol)
 
-                    # Paso 5: Reproducción de la traducción
+                    # Reproducción automática
                     st.audio(audio_tts.content, format="audio/mp3", autoplay=True)
                     
-                    # Actualizar ID para evitar bucles
                     st.session_state.last_audio_id = current_id
-                    status.update(label="✅ Finalizado correctamente", state="complete")
+                    status.update(label="✅ Traducción completada", state="complete")
 
-                # Limpieza de archivo temporal
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
 
         except Exception as e:
-            st.error(f"Error en el sistema: {e}")
+            st.error(f"Error: {e}")
