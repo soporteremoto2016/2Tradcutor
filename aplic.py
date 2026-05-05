@@ -2,14 +2,14 @@ import streamlit as st
 from openai import OpenAI
 import json
 
-# ---------------- 1. SETUP ----------------
-st.set_page_config(page_title="2Bilingue Live", page_icon="🎙️", layout="wide")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="2Bilingue Pro Translator", layout="wide")
 
 if "messages" not in st.session_state: st.session_state.messages = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "user" not in st.session_state: st.session_state.user = None
 
-# ---------------- 2. AUTENTICACIÓN (Simplificada para el ejemplo) ----------------
+# --- 2. LOGIN ---
 if not st.session_state.user:
     st.title("🔐 Acceso 2Bilingue")
     u = st.text_input("Usuario")
@@ -20,7 +20,7 @@ if not st.session_state.user:
             st.rerun()
     st.stop()
 
-# ---------------- 3. SIDEBAR ----------------
+# --- 3. SIDEBAR ---
 with st.sidebar:
     st.title(f"👤 {st.session_state.user}")
     st.session_state.api_key = st.text_input("OpenAI API Key", value=st.session_state.api_key, type="password")
@@ -28,70 +28,82 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# ---------------- 4. LÓGICA PRINCIPAL ----------------
-st.title("🎙️ Traductor Simultáneo Voz a Voz")
+# --- 4. CUERPO PRINCIPAL ---
+st.title("🎙️ Traductor Simultáneo (Voz a Voz)")
 
 if not st.session_state.api_key:
-    st.warning("⚠️ Inserta tu API Key para continuar.")
+    st.warning("⚠️ Ingresa tu API Key en la barra lateral.")
     st.stop()
 
 client = OpenAI(api_key=st.session_state.api_key)
 
-col_es, col_en = st.columns(2)
+# Contenedores para evitar saltos visuales
+col_izq, col_der = st.columns(2)
+placeholder_audio = st.empty()
 
-# Widget de entrada de audio
-audio_file = st.audio_input("Haz clic para hablar (Español)")
+# Widget de Micrófono
+audio_input = st.audio_input("Escuchando español...")
 
-if audio_file:
+if audio_input:
     try:
-        with st.spinner("Procesando..."):
-            # 1. Transcripción
-            audio_file.name = "input.wav"
-            transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-            texto_original = transcript.text.strip()
-
-            # --- VALIDACIÓN CRÍTICA ---
-            # Si el texto está vacío o solo tiene puntos/espacios, detenemos el proceso
-            if not texto_original or len(texto_original) < 2:
-                st.warning("No se detectó voz clara. Por favor, intenta de nuevo.")
+        # Aseguramos que el archivo tenga nombre para Whisper
+        audio_input.name = "input.wav"
+        
+        with st.status("🚀 Procesando...", expanded=True) as status:
+            # 1. Transcripción (Whisper)
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=audio_input
+            )
+            texto_es = transcript.text.strip()
+            
+            if len(texto_es) < 2:
+                st.warning("No se detectó audio claro.")
+                status.update(label="Error de captura", state="error")
             else:
-                # 2. Traducción
-                response = client.chat.completions.create(
+                # 2. Traducción (GPT-4o-mini)
+                res = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "Translate the following text from Spanish to English. Only provide the translation, no extra comments."},
-                        {"role": "user", "content": texto_original}
+                        {"role": "system", "content": "Translate from Spanish to English. Only output the translation, no talk."},
+                        {"role": "user", "content": texto_es}
                     ]
                 )
-                traduccion_texto = response.choices[0].message.content.strip()
+                texto_en = res.choices[0].message.content.strip()
 
-                # 3. Mostrar Resultados
-                with col_es:
-                    st.success("Escuchado (ES):")
-                    st.write(texto_original)
+                # 3. Generación de Voz (TTS)
+                # IMPORTANTE: Usamos .content para obtener los bytes puros
+                audio_response = client.audio.speech.create(
+                    model="tts-1",
+                    voice="nova",
+                    input=texto_en
+                )
+                audio_bytes = audio_response.content # Estos son los bytes reales
+
+                # 4. MOSTRAR RESULTADOS
+                with col_izq:
+                    st.info("🇪🇸 Escuchado")
+                    st.write(texto_es)
                 
-                with col_en:
-                    st.success("Traducido (EN):")
-                    st.markdown(f"### {traduccion_texto}")
-                    
-                    # 4. Generar Voz (Solo si hay texto válido)
-                    if traduccion_texto:
-                        tts = client.audio.speech.create(
-                            model="tts-1",
-                            voice="nova",
-                            input=traduccion_texto
-                        )
-                        st.audio(tts.content, format="audio/mp3", autoplay=True)
-                        
-                        # Guardar en historial
-                        st.session_state.messages.append({"es": texto_original, "en": traduccion_texto})
+                with col_der:
+                    st.success("🇺🇸 Traducido")
+                    st.markdown(f"### {texto_en}")
+
+                # 5. REPRODUCCIÓN AUTOMÁTICA
+                # Aquí es donde fallaba: pasamos audio_bytes directamente
+                with placeholder_audio:
+                    st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                
+                st.session_state.messages.append({"es": texto_es, "en": texto_en})
+                status.update(label="✅ Traducido con éxito", state="complete", expanded=False)
 
     except Exception as e:
-        st.error(f"Error técnico: {e}")
+        st.error(f"Error técnico: {str(e)}")
 
-# ---------------- 5. HISTORIAL ----------------
+# --- 5. HISTORIAL ---
 if st.session_state.messages:
     st.divider()
-    st.subheader("Historial de la sesión")
     for m in reversed(st.session_state.messages):
-        st.text(f"🇪🇸 {m['es']}  ➡️  🇺🇸 {m['en']}")
+        with st.expander(f"Frase: {m['es'][:30]}...", expanded=False):
+            st.write(f"**ES:** {m['es']}")
+            st.write(f"**EN:** {m['en']}")
