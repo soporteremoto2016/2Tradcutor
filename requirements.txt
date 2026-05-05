@@ -4,3 +4,4 @@ openai
 pydub
 aiortc
 streamlit-autorefresh
+streamlit-audio-recorder
