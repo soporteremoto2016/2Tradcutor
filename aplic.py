@@ -3,185 +3,117 @@ from openai import OpenAI
 import json
 import re
 
-# ---------------- 1. CONFIGURACIÓN E INICIALIZACIÓN ----------------
-st.set_page_config(page_title="2Bilingue Pro", page_icon="🌍", layout="centered")
+# ---------------- 1. SETUP DE EXPERTO ----------------
+st.set_page_config(page_title="2Bilingue Live Translator", page_icon="🎙️", layout="wide")
 
-# Inicialización de variables de estado (Evita el AttributeError)
-if "user" not in st.session_state:
-    st.session_state.user = None
-if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "topic" not in st.session_state:
-    st.session_state.topic = ""
-if "last_audio_id" not in st.session_state:
-    st.session_state.last_audio_id = None
+# Inicialización segura del estado
+if "messages" not in st.session_state: st.session_state.messages = []
+if "user" not in st.session_state: st.session_state.user = None
+if "api_key" not in st.session_state: st.session_state.api_key = ""
 
-# Estilos CSS
+# Estilos refinados
 st.markdown("""
     <style>
-    .stApp { background-color: #73C2FB; }
-    .login-container {
-        background-color: white; padding: 30px;
-        border-radius: 15px; box-shadow: 0px 8px 16px rgba(0,0,0,0.1);
-    }
-    .login-header { color: #1565C0; text-align: center; }
+    .stApp { background-color: #F0F2F6; }
+    .main-card { background: white; padding: 2rem; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .translation-box { border-left: 5px solid #1565C0; background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 10px 0; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# ---------------- 2. FUNCIONES DE DATOS ----------------
-def load_data():
+# ---------------- 2. GESTIÓN DE DATOS ----------------
+def load_db():
     try:
-        with open("data.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+        with open("data.json", "r") as f: return json.load(f)
+    except: return {}
 
-def save_data(data):
-    with open("data.json", "w") as f:
-        json.dump(data, f)
+def save_db(data):
+    with open("data.json", "w") as f: json.dump(data, f)
 
-def clear_session_data():
-    st.session_state.messages = []
-    st.session_state.topic = ""
-    st.session_state.last_audio_id = None
+db = load_db()
 
-data = load_data()
-PASSWORD_REQUERIDA = "Seguridad2026*+"
-
-# ---------------- 3. LÓGICA DE LOGIN ----------------
+# ---------------- 3. AUTENTICACIÓN ----------------
 if not st.session_state.user:
-    col1, col2, col3 = st.columns([0.5, 2, 0.5])
-    with col2:
-        st.markdown('<div class="login-container">', unsafe_allow_html=True)
-        st.markdown('<h1 class="login-header">🔐 Acceso 2Bilingue</h1>', unsafe_allow_html=True)
-        
-        user_input = st.text_input("Nombre de Usuario")
-        pass_input = st.text_input("Contraseña", type="password")
-
-        if st.button("Ingresar", use_container_width=True):
-            if pass_input != PASSWORD_REQUERIDA:
-                st.error("Contraseña incorrecta.")
-            elif not user_input:
-                st.warning("Ingresa un usuario.")
-            else:
-                if user_input not in data:
-                    data[user_input] = {
-                        "stats": {"conversaciones": 0, "promedio": 0, "nivel": "A1"}
-                    }
-                    save_data(data)
-                st.session_state.user = user_input
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.markdown('<div class="main-card">', unsafe_allow_html=True)
+        st.title("🔐 Acceso 2Bilingue")
+        u = st.text_input("Usuario")
+        p = st.text_input("Contraseña", type="password")
+        if st.button("Entrar", use_container_width=True):
+            if p == "Seguridad2026*+":
+                st.session_state.user = u
+                if u not in db:
+                    db[u] = {"stats": {"conversaciones": 0, "nivel": "A1"}}
+                    save_db(db)
                 st.rerun()
+            else: st.error("Clave incorrecta")
         st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
-# ---------------- 4. SIDEBAR (API Y STATS) ----------------
+# ---------------- 4. INTERFAZ PRINCIPAL ----------------
 with st.sidebar:
-    st.header(f"👤 {st.session_state.user}")
-    u_data = data.get(st.session_state.user, {})
-    stats = u_data.get("stats", {"conversaciones": 0, "promedio": 0, "nivel": "A1"})
-    
-    st.metric("Conversaciones", stats["conversaciones"])
-    st.metric("Nivel", stats["nivel"])
-    
-    if st.button("Cerrar sesión"):
+    st.title(f"👤 {st.session_state.user}")
+    st.session_state.api_key = st.text_input("OpenAI API Key", value=st.session_state.api_key, type="password")
+    if st.button("Cerrar Sesión"):
         st.session_state.user = None
         st.rerun()
 
-    st.divider()
-    api_key_input = st.text_input("OpenAI API Key", value=st.session_state.api_key, type="password")
-    if st.button("Guardar API Key"):
-        st.session_state.api_key = api_key_input
-        st.success("Guardada")
-        st.rerun()
-
-# ---------------- 5. LÓGICA DE CLASE ----------------
-SYSTEM_PROMPT = """You are Paty, a professional English teacher. 
-Speak in English, but provide corrections or brief explanations in Spanish.
-First, ask the user their level (A1-C2). Keep the topic relevant.
-End sessions with 'Evaluación final' and 'Puntuación general: [0-100]'."""
+st.title("🎙️ Traductor Simultáneo Pro")
+st.info("Instrucciones: Activa el micro, habla y el sistema traducirá al inglés automáticamente.")
 
 if not st.session_state.api_key:
-    st.warning("Configura tu API Key en el menú lateral.")
+    st.warning("⚠️ Inserta tu API Key en la barra lateral para comenzar.")
     st.stop()
 
 client = OpenAI(api_key=st.session_state.api_key)
 
-if not st.session_state.topic:
-    st.title("🌍 2Bilingue Pro")
-    tema = st.text_input("🎯 ¿Sobre qué practicamos hoy?")
-    if st.button("Comenzar"):
-        st.session_state.topic = tema
-        st.session_state.messages = [{"role": "assistant", "content": f"Hello! Let's talk about {tema}. What is your level (A1, A2, B1, B2, C1, C2)?"}]
-        st.rerun()
-    st.stop()
+# ---------------- 5. LÓGICA DE TRADUCCIÓN "EN LÍNEA" ----------------
+col_left, col_right = st.columns(2)
 
-# ---------------- 6. CHAT Y PROCESAMIENTO DE AUDIO ----------------
-st.title(f"👩‍🏫 Clase: {st.session_state.topic}")
+with col_left:
+    st.subheader("👂 Escucha (Español)")
+    # El widget de audio_input es el trigger
+    audio_file = st.audio_input("Grabar voz para traducir")
 
-# Mostrar historial
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+if audio_file:
+    with st.spinner("Interpretando..."):
+        # 1. Transcripción inmediata del audio original
+        audio_file.name = "input.wav"
+        transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        texto_original = transcript.text
+        
+        with col_left:
+            st.markdown(f"**Dijeron:** *{texto_original}*")
 
-# Entrada de Audio (El Microfono)
-audio_data = st.audio_input("🎤 Habla con tu profesora")
+        # 2. Traducción y Respuesta de IA (Simultaneidad simulada)
+        # Usamos gpt-4o-mini para máxima velocidad
+        prompt_traduccion = f"Translate the following Spanish text to natural English: '{texto_original}'. Provide only the translation."
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "You are a professional simultaneous interpreter."},
+                      {"role": "user", "content": prompt_traduccion}]
+        )
+        traduccion_texto = response.choices[0].message.content
 
-if audio_data and id(audio_data) != st.session_state.last_audio_id:
-    st.session_state.last_audio_id = id(audio_data)
-    
-    try:
-        with st.spinner("Escuchando y traduciendo..."):
-            # 1. Transcripción (Voz a Texto)
-            audio_data.name = "audio.wav"
-            transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_data)
-            user_text = transcript.text
+        with col_right:
+            st.subheader("🇺🇸 Traducción (Inglés)")
+            st.markdown(f'<div class="translation-box"><h4>{traduccion_texto}</h4></div>', unsafe_allow_html=True)
             
-            # 2. Agregar a historial y mostrar
-            st.session_state.messages.append({"role": "user", "content": user_text})
-            with st.chat_message("user"):
-                st.write(user_text)
-
-            # 3. Generar respuesta de la IA
-            with st.chat_message("assistant"):
-                full_history = [{"role": "system", "content": SYSTEM_PROMPT}] + st.session_state.messages
-                response = client.chat.completions.create(model="gpt-4o-mini", messages=full_history)
-                reply = response.choices[0].message.content
-                
-                # 4. Generar Voz (Texto a Voz)
-                audio_res = client.audio.speech.create(model="tts-1", voice="nova", input=reply[:4096])
-                
-                # 5. Mostrar y Guardar
-                st.write(reply)
-                st.audio(audio_res.content, format="audio/mp3")
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-
-                # Lógica de estadísticas (si termina la clase)
-                if "Evaluación final" in reply:
-                    stats["conversaciones"] += 1
-                    match = re.search(r'Puntuación general: (\d+)', reply)
-                    if match:
-                        score = int(match.group(1))
-                        stats["promedio"] = int((stats["promedio"] + score) / 2) if stats["conversaciones"] > 1 else score
-                    save_data(data)
-
-    except Exception as e:
-        st.error(f"Error procesando audio: {e}")
-
-# Botones de utilidad
-st.divider()
-col_a, col_b = st.columns(2)
-with col_a:
-    if st.button("🇪🇸 Traducir última"):
-        if st.session_state.messages:
-            last = [m for m in st.session_state.messages if m["role"] == "assistant"][-1]["content"]
-            tr_res = client.chat.completions.create(
-                model="gpt-4o-mini", 
-                messages=[{"role": "user", "content": f"Traduce al español: {last}"}]
+            # 3. Voz automática (TTS)
+            tts = client.audio.speech.create(
+                model="tts-1",
+                voice="onyx",
+                input=traduccion_texto
             )
-            st.info(tr_res.choices[0].message.content)
-with col_b:
-    if st.button("🧹 Nuevo Tema"):
-        clear_session_data()
-        st.rerun()
+            st.audio(tts.content, format="audio/mp3", autoplay=True)
+
+# ---------------- 6. HISTORIAL VISUAL ----------------
+with st.expander("Ver historial de traducción"):
+    if texto_original := locals().get('texto_original'):
+        st.session_state.messages.append({"es": texto_original, "en": traduccion_texto})
+    
+    for m in reversed(st.session_state.messages):
+        st.write(f"🇪🇸 {m['es']}")
+        st.write(f"🇬🇧 {m['en']}")
+        st.divider()
