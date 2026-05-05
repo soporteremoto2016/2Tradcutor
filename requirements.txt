@@ -1,4 +1,5 @@
-streamlit
+streamlit==1.31.0
+streamlit-webrtc==0.47.1
 openai
-streamlit-webrtc
 pydub
+aiortc
