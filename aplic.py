@@ -1,82 +1,113 @@
 import streamlit as st
-from audio_recorder_streamlit import audio_recorder
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 from openai import OpenAI
-import tempfile
+import queue
+import pydub
 import os
+import tempfile
+import time
 
-st.set_page_config(page_title="2Bilingue Pro - Estable", page_icon="🎙️")
+st.set_page_config(page_title="2Bilingue Pro - Live Streaming", layout="wide")
 
-# --- LOGIN ---
-if "auth" not in st.session_state:
-    st.title("🔐 Acceso 2Bilingue")
-    p = st.text_input("Contraseña", type="password")
-    if st.button("Entrar"):
-        if p == "Seguridad2026*+":
-            st.session_state.auth = True
-            st.rerun()
-    st.stop()
+# --- LOGIN Y CONFIG ---
+if "history" not in st.session_state: st.session_state.history = []
+if "api_key" not in st.session_state: st.session_state.api_key = ""
 
-# --- CONFIGURACIÓN ---
-api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-client = OpenAI(api_key=api_key) if api_key else None
+st.sidebar.title("⚙️ Configuración")
+st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
 
-st.title("🎙️ Traductor de Voz a Texto (Modo Estable)")
-st.write("Este modo garantiza la captura de audio en cualquier navegador.")
+# --- PROCESADOR DE AUDIO EN TIEMPO REAL ---
+class LiveAudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.audio_queue = queue.Queue()
 
-# --- INTERFAZ DE GRABACIÓN ---
-if client:
-    st.write("### 1. Pulsa el micrófono para grabar")
-    # Este componente muestra una onda real mientras hablas
-    audio_bytes = audio_recorder(
-        text="Haz clic para grabar...",
-        recording_color="#e8b62c",
-        neutral_color="#6aa36f",
-        icon_size="3x",
+    def recv_audio(self, frame):
+        # Captura frames y los mete en la cola sin detener el flujo
+        self.audio_queue.put(frame)
+        return frame
+
+# --- INTERFAZ PRINCIPAL ---
+st.title("🎙️ Intérprete Simultáneo en Vivo")
+st.caption("El texto aparecerá automáticamente cada pocos segundos mientras hablas.")
+
+col_en, col_es = st.columns(2)
+container_en = col_en.empty()
+container_es = col_es.empty()
+
+if st.session_state.api_key:
+    client = OpenAI(api_key=st.session_state.api_key)
+
+    webrtc_ctx = webrtc_streamer(
+        key="live-translator-v4",
+        mode=WebRtcMode.SENDONLY,
+        audio_processor_factory=LiveAudioProcessor,
+        media_stream_constraints={"audio": True, "video": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        async_processing=True,
     )
 
-    if audio_bytes:
-        st.audio(audio_bytes, format="audio/wav")
-        st.write("### 2. Procesando traducción...")
+    # Lógica de procesamiento "en caliente"
+    if webrtc_ctx.audio_processor:
+        if "audio_buffer" not in st.session_state:
+            st.session_state.audio_buffer = pydub.AudioSegment.empty()
+
+        # Extraemos frames de la cola mientras el micro sigue abierto
+        new_frames = []
+        while True:
+            try:
+                new_frames.append(webrtc_ctx.audio_processor.audio_queue.get_nowait())
+            except queue.Empty:
+                break
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
-
-        try:
-            # 1. Transcripción con Whisper
-            with open(tmp_path, "rb") as f:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1", 
-                    file=f, 
-                    language="en"
+        if new_frames:
+            for frame in new_frames:
+                sound = pydub.AudioSegment(
+                    data=frame.to_ndarray().tobytes(),
+                    sample_width=frame.format.bytes,
+                    frame_rate=frame.sample_rate,
+                    channels=len(frame.layout.channels)
                 )
-            
-            text_en = transcript.text
-            
-            if text_en:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.info(f"🇺🇸 **Inglés:**\n\n{text_en}")
-                
-                # 2. Traducción con GPT
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Traduce este texto al español de forma profesional."},
-                        {"role": "user", "content": text_en}
-                    ]
-                )
-                text_es = response.choices[0].message.content
-                
-                with col2:
-                    st.success(f"🇪🇸 **Español:**\n\n{text_es}")
-            else:
-                st.warning("No se detectó voz clara. Intenta de nuevo.")
+                st.session_state.audio_buffer += sound
 
-        except Exception as e:
-            st.error(f"Error: {e}")
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-else:
-    st.warning("👈 Ingresa tu OpenAI API Key para comenzar.")
+        # UMBRAL DE TIEMPO: Procesamos cada 4 segundos de audio acumulado
+        if len(st.session_state.buffer) > 4000:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                st.session_state.buffer.export(tmp.name, format="wav")
+                
+                try:
+                    # 1. Whisper transcribe el bloque actual
+                    with open(tmp.name, "rb") as f:
+                        transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+                    
+                    if transcript.text.strip():
+                        # 2. GPT traduce el bloque
+                        res = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": f"Traduce: {transcript.text}"}]
+                        )
+                        
+                        # Actualizamos la pantalla sin detener el micro
+                        container_en.info(f"**🇺🇸 Inglés:**\n{transcript.text}")
+                        container_es.success(f"**🇪🇸 Español:**\n{res.choices[0].message.content}")
+                        
+                        # Guardamos en el historial
+                        st.session_state.history.append({"en": transcript.text, "es": res.choices[0].message.content})
+                        
+                    # IMPORTANTE: Vaciamos el buffer para la siguiente tanda, pero el micro sigue START
+                    st.session_state.buffer = pydub.AudioSegment.empty()
+                    
+                except Exception as e:
+                    pass # Manejo silencioso para no interrumpir el flujo
+                finally:
+                    if os.path.exists(tmp.name): os.remove(tmp.name)
+
+        # Forzamos un pequeño delay y rerun para que Streamlit vuelva a mirar la cola
+        time.sleep(0.1)
+        st.rerun()
+
+# --- HISTORIAL ACUMULADO ---
+if st.session_state.history:
+    with st.expander("Historial de la conversación"):
+        for item in reversed(st.session_state.history):
+            st.write(f"**EN:** {item['en']}  \n**ES:** {item['es']}")
+            st.divider()
