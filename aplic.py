@@ -7,116 +7,94 @@ import pydub
 import os
 import tempfile
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="2Bilingue Pro Live", layout="wide")
+st.set_page_config(page_title="2Bilingue Quick-Live", layout="wide")
 
-# Refresco cada 2 segundos para forzar la actualización de la UI
-st_autorefresh(interval=2000, key="refresh")
+# Refresco rápido para procesar la cola de audio
+st_autorefresh(interval=1500, key="frequent_refresh")
 
-if "user" not in st.session_state: st.session_state.user = None
-if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "history" not in st.session_state: st.session_state.history = []
-if "buffer" not in st.session_state: st.session_state.buffer = pydub.AudioSegment.empty()
+if "audio_buffer" not in st.session_state: st.session_state.audio_buffer = pydub.AudioSegment.empty()
 
-# --- 2. LOGIN ---
-if not st.session_state.user:
-    st.title("🚀 Acceso 2Bilingue")
-    u = st.text_input("Usuario")
-    p = st.text_input("Contraseña", type="password")
+# --- LOGIN SIMPLIFICADO ---
+if "auth" not in st.session_state:
+    st.title("🔐 Acceso")
+    p = st.text_input("Password", type="password")
     if st.button("Entrar"):
         if p == "Seguridad2026*+":
-            st.session_state.user = u
+            st.session_state.auth = True
             st.rerun()
     st.stop()
 
-# --- 3. PROCESADOR DE AUDIO ---
-class AudioProcessor(AudioProcessorBase):
+# --- SIDEBAR ---
+api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+client = OpenAI(api_key=api_key) if api_key else None
+
+st.title("🎙️ Traducción Instantánea")
+
+# Columnas fijas
+col1, col2 = st.columns(2)
+area_en = col1.empty()
+area_es = col2.empty()
+
+class SimpleAudioProcessor(AudioProcessorBase):
     def __init__(self):
         self.audio_queue = queue.Queue()
     def recv_audio(self, frame):
         self.audio_queue.put(frame)
         return frame
 
-# --- 4. DISEÑO DE INTERFAZ (FUERA DE CONDICIONALES) ---
-st.sidebar.header(f"👤 {st.session_state.user}")
-st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
-
-st.title("🎙️ Traducción Simultánea Profesional")
-st.divider()
-
-# ESTAS CAJAS SIEMPRE DEBEN SER VISIBLES
-col_en, col_es = st.columns(2)
-with col_en:
-    st.subheader("🇺🇸 Input: Inglés")
-    area_en = st.empty() # Contenedor permanente
-    area_en.markdown("---")
-
-with col_es:
-    st.subheader("🇪🇸 Output: Español")
-    area_es = st.empty() # Contenedor permanente
-    area_es.markdown("---")
-
-# --- 5. LÓGICA DE TRADUCCIÓN ---
-if st.session_state.api_key:
-    client = OpenAI(api_key=st.session_state.api_key)
-    
-    # El componente WebRTC se muestra aquí
-    ctx = webrtc_streamer(
-        key="interpreter-live",
+if client:
+    webrtc_ctx = webrtc_streamer(
+        key="simple-trans",
         mode=WebRtcMode.SENDONLY,
-        audio_processor_factory=AudioProcessor,
+        audio_processor_factory=SimpleAudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        async_processing=True
+        async_processing=True,
     )
 
-    if ctx.audio_processor:
-        # Extraer audio
-        frames = []
+    if webrtc_ctx.audio_processor:
+        # Extraer frames
         while True:
             try:
-                frames.append(ctx.audio_processor.audio_queue.get_nowait())
-            except queue.Empty:
-                break
-        
-        if frames:
-            for frame in frames:
+                frame = webrtc_ctx.audio_processor.audio_queue.get_nowait()
                 sound = pydub.AudioSegment(
                     data=frame.to_ndarray().tobytes(),
                     sample_width=frame.format.bytes,
                     frame_rate=frame.sample_rate,
                     channels=len(frame.layout.channels)
                 )
-                st.session_state.buffer += sound
+                st.session_state.audio_buffer += sound
+            except queue.Empty:
+                break
 
-        # Procesar cada 3.5 segundos
-        if len(st.session_state.buffer) > 3500:
+        # Procesar fragmento cada 2.5 segundos de audio capturado
+        if len(st.session_state.audio_buffer) > 2500:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                st.session_state.buffer.export(tmp.name, format="wav")
+                st.session_state.audio_buffer.export(tmp.name, format="wav")
                 try:
+                    # 1. Escuchar
                     with open(tmp.name, "rb") as f:
-                        trans = client.audio.transcriptions.create(model="whisper-1", file=f, language="en")
+                        trans = client.audio.transcriptions.create(model="whisper-1", file=f)
                     
                     if trans.text.strip():
+                        # 2. Traducir
                         res = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[{"role": "system", "content": "Traduce al español."}, {"role": "user", "content": trans.text}]
+                            messages=[{"role": "user", "content": f"Traduce al español: {trans.text}"}]
                         )
+                        # 3. Guardar y Mostrar
                         st.session_state.history.append({"en": trans.text, "es": res.choices[0].message.content})
-                        st.session_state.buffer = pydub.AudioSegment.empty()
-                except Exception as e:
-                    st.error(f"Error de API: {e}")
+                        st.session_state.audio_buffer = pydub.AudioSegment.empty()
                 finally:
                     if os.path.exists(tmp.name): os.remove(tmp.name)
 
-# --- 6. MOSTRAR RESULTADOS EN TIEMPO REAL ---
+# Mostrar resultados
 if st.session_state.history:
     last = st.session_state.history[-1]
-    # Inyectamos el texto en los contenedores 'empty' creados arriba
-    area_en.info(f"{last['en']}")
-    area_es.success(f"{last['es']}")
+    area_en.info(f"🇺🇸 **EN:** {last['en']}")
+    area_es.success(f"🇪🇸 **ES:** {last['es']}")
 
-    with st.expander("Ver Log de la sesión"):
+    with st.expander("Historial Completo"):
         for h in reversed(st.session_state.history):
-            st.write(f"**EN:** {h['en']}  \n**ES:** {h['es']}")
-            st.divider()
+            st.write(f"**{h['en']}** ➔ {h['es']}")
