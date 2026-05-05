@@ -1,16 +1,17 @@
 import streamlit as st
 from openai import OpenAI
 import json
+import tempfile
+import os
 
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="2Bilingue Pro Translator", layout="wide")
 
-# Inicialización de estados
 if "messages" not in st.session_state: st.session_state.messages = []
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "user" not in st.session_state: st.session_state.user = None
 
-# --- 2. LOGIN (Mantenemos tu seguridad) ---
+# --- 2. LOGIN (Seguridad requerida) ---
 if not st.session_state.user:
     st.title("🔐 Acceso 2Bilingue")
     u = st.text_input("Usuario")
@@ -26,10 +27,10 @@ with st.sidebar:
     st.title(f"👤 {st.session_state.user}")
     st.session_state.api_key = st.text_input("OpenAI API Key", value=st.session_state.api_key, type="password")
     st.divider()
-    st.info("Este traductor detecta si hablas en Español o Inglés y traduce al idioma contrario automáticamente.")
+    st.info("Traducción inteligente bidireccional (ES ↔ EN).")
 
-# --- 4. LÓGICA DE TRADUCCIÓN MEJORADA ---
-st.title("🎙️ Traductor Inteligente (ES ↔ EN)")
+# --- 4. LÓGICA DE TRADUCCIÓN ROBUSTA ---
+st.title("🎙️ Traductor Simultáneo Corregido")
 
 if not st.session_state.api_key:
     st.warning("⚠️ Ingresa tu API Key para comenzar.")
@@ -37,87 +38,87 @@ if not st.session_state.api_key:
 
 client = OpenAI(api_key=st.session_state.api_key)
 
-# Contenedores visuales
-col_input, col_output = st.columns(2)
+col_izq, col_der = st.columns(2)
 placeholder_audio = st.empty()
 
-# Entrada de audio
-audio_data = st.audio_input("Escuchando...")
+# Widget de entrada de audio
+audio_input = st.audio_input("Haz clic y habla ahora...")
 
-if audio_data:
+if audio_input:
     try:
-        audio_data.name = "audio.wav"
-        
-        with st.status("🧠 Interpretando y Traduciendo...", expanded=True) as status:
-            # 1. Transcripción (Whisper)
-            # Usamos Whisper para pasar de Voz a Texto
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1", 
-                file=audio_data
-            )
-            texto_detectado = transcript.text.strip()
+        # TÉCNICA DE EXPERTO: Uso de archivo temporal para asegurar que el audio no se pierda
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            tmp_file.write(audio_input.getvalue())
+            tmp_path = tmp_file.name
+
+        with st.status("👂 Escuchando y procesando...", expanded=True) as status:
+            # 1. Transcripción con archivo físico (Previene el error de 'No se detectó audio')
+            with open(tmp_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", 
+                    file=f
+                )
             
-            if not texto_detectado:
-                st.warning("No se detectó audio.")
+            texto_escuchado = transcript.text.strip()
+            
+            if not texto_escuchado:
+                st.error("No se detectó texto en el audio. Intenta hablar más cerca del micrófono.")
+                status.update(label="❌ Audio vacío", state="error")
             else:
-                # 2. Traducción Inteligente con Prompt Reforzado
-                # Aquí es donde arreglamos que traduzca TODO y al idioma correcto
+                # 2. Traducción Total (Bidireccional y Completa)
                 prompt_sistema = """
-                Eres un traductor experto y preciso. 
-                Tu tarea es detectar el idioma del texto:
-                - Si el texto está en ESPAÑOL, tradúcelo íntegramente al INGLÉS.
-                - Si el texto está en INGLÉS, tradúcelo íntegramente al ESPAÑOL.
-                REGLAS CRÍTICAS:
-                1. No resumas. Traduce cada palabra y detalle.
-                2. No añadas comentarios tuyos (como "Aquí está la traducción").
-                3. Solo devuelve el texto traducido.
+                Eres un traductor simultáneo de alta fidelidad.
+                Instrucciones:
+                - Traduce TODO el texto sin omitir detalles.
+                - Si el texto está en Español, traduce al Inglés.
+                - Si el texto está en Inglés, traduce al Español.
+                - Responde ÚNICAMENTE con la traducción.
                 """
                 
-                response = client.chat.completions.create(
+                traduccion = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": prompt_sistema},
-                        {"role": "user", "content": texto_detectado}
+                        {"role": "user", "content": texto_escuchado}
                     ],
-                    temperature=0.3 # Baja temperatura para mayor fidelidad y menos "creatividad"
+                    temperature=0
                 )
-                texto_traducido = response.choices[0].message.content.strip()
+                texto_traducido = traduccion.choices[0].message.content.strip()
 
-                # 3. Generación de Voz (TTS)
-                # Detectamos qué voz usar según el idioma de salida
-                # Si el original era español, la salida es inglés (voz nova). 
-                # Si el original era inglés, la salida es español (voz nova tiene buen acento español).
-                audio_gen = client.audio.speech.create(
+                # 3. Generación de Audio de salida
+                audio_res = client.audio.speech.create(
                     model="tts-1",
                     voice="nova",
                     input=texto_traducido
                 )
 
-                # 4. Mostrar Resultados
-                with col_input:
-                    st.subheader("👂 Escuchado:")
-                    st.info(texto_detectado)
+                # 4. Mostrar en pantalla
+                with col_izq:
+                    st.subheader("🇪🇸 Escuchado")
+                    st.info(texto_escuchado)
                 
-                with col_output:
-                    st.subheader("📢 Traducción:")
+                with col_der:
+                    st.subheader("🇺🇸 Traducido")
                     st.success(texto_traducido)
 
-                # 5. Audio automático
+                # 5. Reproducción automática
                 with placeholder_audio:
-                    st.audio(audio_gen.content, format="audio/mp3", autoplay=True)
+                    st.audio(audio_res.content, format="audio/mp3", autoplay=True)
                 
-                # Guardar historial
-                st.session_state.messages.append({"orig": texto_detectado, "trad": texto_traducido})
-                status.update(label="✅ Traducción completada", state="complete", expanded=False)
+                status.update(label="✅ Listo", state="complete", expanded=False)
+                st.session_state.messages.append({"original": texto_escuchado, "traduccion": texto_traducido})
+
+        # Limpieza del archivo temporal
+        os.remove(tmp_path)
 
     except Exception as e:
-        st.error(f"Hubo un error: {e}")
+        st.error(f"Error técnico: {e}")
 
 # --- 5. HISTORIAL ---
 if st.session_state.messages:
     st.divider()
-    with st.expander("Historial de la conversación"):
+    with st.expander("Historial de traducciones"):
         for m in reversed(st.session_state.messages):
-            st.write(f"Entrada: {m['orig']}")
-            st.write(f"Traducción: {m['trad']}")
+            st.write(f"Voz: {m['original']}")
+            st.write(f"Traducción: {m['traduccion']}")
             st.divider()
