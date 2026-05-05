@@ -7,23 +7,23 @@ import pydub
 import os
 import tempfile
 
-# --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="2Bilingue Pro - Real Time", layout="wide")
+# --- 1. CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="2Bilingue Pro Live", layout="wide")
+
+# Refresco cada 2 segundos para forzar la actualización de la UI
+st_autorefresh(interval=2000, key="refresh")
 
 if "user" not in st.session_state: st.session_state.user = None
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "history" not in st.session_state: st.session_state.history = []
 if "buffer" not in st.session_state: st.session_state.buffer = pydub.AudioSegment.empty()
 
-# Refresco automático cada 2 segundos para procesar el texto
-st_autorefresh(interval=2000, key="datarefresh")
-
 # --- 2. LOGIN ---
 if not st.session_state.user:
-    st.title("🎙️ Acceso Sistema Intérprete")
+    st.title("🚀 Acceso 2Bilingue")
     u = st.text_input("Usuario")
     p = st.text_input("Contraseña", type="password")
-    if st.button("Ingresar"):
+    if st.button("Entrar"):
         if p == "Seguridad2026*+":
             st.session_state.user = u
             st.rerun()
@@ -33,27 +33,36 @@ if not st.session_state.user:
 class AudioProcessor(AudioProcessorBase):
     def __init__(self):
         self.audio_queue = queue.Queue()
-
     def recv_audio(self, frame):
         self.audio_queue.put(frame)
         return frame
 
-# --- 4. INTERFAZ ---
+# --- 4. DISEÑO DE INTERFAZ (FUERA DE CONDICIONALES) ---
 st.sidebar.header(f"👤 {st.session_state.user}")
 st.session_state.api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.api_key)
 
-st.title("🚀 Traducción Simultánea Escrita (EN ➔ ES)")
+st.title("🎙️ Traducción Simultánea Profesional")
+st.divider()
 
+# ESTAS CAJAS SIEMPRE DEBEN SER VISIBLES
 col_en, col_es = st.columns(2)
-area_en = col_en.empty()
-area_es = col_es.empty()
+with col_en:
+    st.subheader("🇺🇸 Input: Inglés")
+    area_en = st.empty() # Contenedor permanente
+    area_en.markdown("---")
 
-# --- 5. MOTOR DE STREAMING ---
+with col_es:
+    st.subheader("🇪🇸 Output: Español")
+    area_es = st.empty() # Contenedor permanente
+    area_es.markdown("---")
+
+# --- 5. LÓGICA DE TRADUCCIÓN ---
 if st.session_state.api_key:
     client = OpenAI(api_key=st.session_state.api_key)
     
+    # El componente WebRTC se muestra aquí
     ctx = webrtc_streamer(
-        key="interpreter",
+        key="interpreter-live",
         mode=WebRtcMode.SENDONLY,
         audio_processor_factory=AudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
@@ -62,7 +71,7 @@ if st.session_state.api_key:
     )
 
     if ctx.audio_processor:
-        # 1. Extraer audio de la cola
+        # Extraer audio
         frames = []
         while True:
             try:
@@ -70,7 +79,6 @@ if st.session_state.api_key:
             except queue.Empty:
                 break
         
-        # 2. Convertir y acumular en el buffer
         if frames:
             for frame in frames:
                 sound = pydub.AudioSegment(
@@ -81,44 +89,34 @@ if st.session_state.api_key:
                 )
                 st.session_state.buffer += sound
 
-        # 3. Procesar si tenemos más de 3 segundos de voz
-        if len(st.session_state.buffer) > 3000:
+        # Procesar cada 3.5 segundos
+        if len(st.session_state.buffer) > 3500:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 st.session_state.buffer.export(tmp.name, format="wav")
-                
                 try:
-                    # Transcripción rápida
                     with open(tmp.name, "rb") as f:
                         trans = client.audio.transcriptions.create(model="whisper-1", file=f, language="en")
                     
                     if trans.text.strip():
-                        # Traducción profesional
                         res = client.chat.completions.create(
                             model="gpt-4o-mini",
-                            messages=[
-                                {"role": "system", "content": "Traduce de inglés a español de forma directa."},
-                                {"role": "user", "content": trans.text}
-                            ]
+                            messages=[{"role": "system", "content": "Traduce al español."}, {"role": "user", "content": trans.text}]
                         )
-                        traduccion = res.choices[0].message.content
-                        
-                        # Actualizar historial y limpiar buffer
-                        st.session_state.history.append({"en": trans.text, "es": traduccion})
+                        st.session_state.history.append({"en": trans.text, "es": res.choices[0].message.content})
                         st.session_state.buffer = pydub.AudioSegment.empty()
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error de API: {e}")
                 finally:
                     if os.path.exists(tmp.name): os.remove(tmp.name)
 
-# --- 6. RENDERIZADO DE RESULTADOS ---
-# Mostramos siempre los últimos resultados en las cajas principales
+# --- 6. MOSTRAR RESULTADOS EN TIEMPO REAL ---
 if st.session_state.history:
     last = st.session_state.history[-1]
-    area_en.info(f"🇺🇸 **Inglés:**\n{last['en']}")
-    area_es.success(f"🇪🇸 **Español:**\n{last['es']}")
+    # Inyectamos el texto en los contenedores 'empty' creados arriba
+    area_en.info(f"{last['en']}")
+    area_es.success(f"{last['es']}")
 
-    with st.expander("Transcripción completa de la sesión"):
-        for item in reversed(st.session_state.history):
-            st.write(f"**EN:** {item['en']}")
-            st.write(f"**ES:** {item['es']}")
+    with st.expander("Ver Log de la sesión"):
+        for h in reversed(st.session_state.history):
+            st.write(f"**EN:** {h['en']}  \n**ES:** {h['es']}")
             st.divider()
